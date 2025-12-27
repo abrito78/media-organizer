@@ -187,6 +187,32 @@ def rewrite_inventory(inv: Path, keys: Set[str]) -> None:
     tmp.replace(inv)
 
 # ============================================================
+# REBUILD DO INVENTÁRIO (NOVO)
+# ============================================================
+
+def rebuild_inventory_from_source(
+    source: Path,
+    exts: Set[str],
+    inventory_path: Path,
+) -> None:
+    print("[STATUS] Recriando inventário a partir da origem...")
+    rebuilt: Set[str] = set()
+    total = 0
+
+    for abs_path, _, _ in fast_walk_entries(str(source), exts):
+        try:
+            key = fast_partial_hash(abs_path)
+            rebuilt.add(key)
+            total += 1
+            if total % 500 == 0:
+                print(f"[REBUILD] {total} arquivos processados...")
+        except Exception as e:
+            print(f"[WARN] Falha ao gerar hash: {abs_path} ({e})")
+
+    rewrite_inventory(inventory_path, rebuilt)
+    print(f"[STATUS] Inventário recriado com {len(rebuilt)} entradas.")
+
+# ============================================================
 # CÓPIA SEGURA
 # ============================================================
 
@@ -202,10 +228,6 @@ def unique_target(dest: Path, name: str) -> Path:
 def safe_copy(src: str, dst: Path) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
-
-# ============================================================
-# NOVA ROTINA – CÓPIA DUPLA PARA ARQUIVOS NOVOS
-# ============================================================
 
 def copy_new_file_twice(
     src: str,
@@ -233,11 +255,10 @@ def main() -> None:
                     default=Path("~/inventory_files.txt").expanduser())
     ap.add_argument("--dupe-action", choices=["skip", "to-duplicates"], default="skip")
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument(
-        "--copy-new-to",
-        type=Path,
-        help="Diretório adicional para copiar apenas arquivos novos"
-    )
+    ap.add_argument("--copy-new-to", type=Path,
+                    help="Diretório adicional para copiar apenas arquivos novos")
+    ap.add_argument("--rebuild-inventory", action="store_true",
+                    help="Recria o inventário do zero a partir da origem (não copia arquivos)")
     args = ap.parse_args()
 
     source = args.source.resolve()
@@ -245,7 +266,16 @@ def main() -> None:
     inv_path = args.inventory_file.expanduser().resolve()
     extra_new_dest = args.copy_new_to.expanduser().resolve() if args.copy_new_to else None
 
-    # garante criação do diretório base do extra
+    # ---------- REBUILD MODE ----------
+    if args.rebuild_inventory:
+        if args.dry_run:
+            print("[ERROR] --rebuild-inventory não pode ser usado com --dry-run")
+            return
+        ensure_inventory(inv_path)
+        rebuild_inventory_from_source(source, DEFAULT_EXTS, inv_path)
+        print("[DONE] Rebuild do inventário finalizado.")
+        return
+
     if extra_new_dest and not args.dry_run:
         extra_new_dest.mkdir(parents=True, exist_ok=True)
 
