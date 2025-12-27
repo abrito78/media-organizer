@@ -43,11 +43,8 @@ DATE_TAGS_PREFERRED = [
 EXIFTOOL_DATE_FMT = "%Y-%m-%dT%H:%M:%S%z"
 PARTIAL_HASH_BYTES = 64 * 1024  # 64 KB
 
-# Limites defensivos para timestamps (ajuste se quiser)
-# (evita crash em NAS com timestamps corrompidos)
 MIN_VALID_YEAR = 1970
 MAX_VALID_YEAR = 2100
-
 
 # ============================================================
 # HASH PARCIAL (CRC32)
@@ -60,16 +57,11 @@ def fast_partial_hash(path: str) -> str:
         crc = zlib.crc32(chunk, crc)
     return f"{crc:08x}"
 
-
 # ============================================================
 # DATETIME FALLBACK SEGURO
 # ============================================================
 
 def safe_datetime_from_timestamp(ts: float) -> Optional[datetime]:
-    """
-    Converte timestamp para datetime, mas sem derrubar o script.
-    Retorna None se o timestamp estiver inválido/fora de range.
-    """
     try:
         dt = datetime.fromtimestamp(ts)
         if dt.year < MIN_VALID_YEAR or dt.year > MAX_VALID_YEAR:
@@ -77,7 +69,6 @@ def safe_datetime_from_timestamp(ts: float) -> Optional[datetime]:
         return dt
     except Exception:
         return None
-
 
 # ============================================================
 # VARREDURA OTIMIZADA
@@ -106,7 +97,6 @@ def fast_walk_entries(root: str, exts: Set[str]):
         except OSError:
             continue
 
-
 # ============================================================
 # EXIFTOOL BATCH (TOLERANTE A ERROS)
 # ============================================================
@@ -117,12 +107,9 @@ def parse_exif_dt(value: str) -> Optional[datetime]:
     s = str(value).strip()
     if not s or s == "-":
         return None
-
-    # ExifTool retorna algo como 2020-01-01T12:34:56-0300
     try:
         return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S%z").replace(tzinfo=None)
     except Exception:
-        # Alguns casos podem vir com offset -03:00
         if len(s) >= 6 and (s[-6] in "+-") and (s[-3] == ":"):
             s2 = s[:-3] + s[-2:]
             try:
@@ -131,11 +118,9 @@ def parse_exif_dt(value: str) -> Optional[datetime]:
                 return None
         return None
 
-
 def exiftool_dates(file_list: list[str]) -> Dict[str, datetime]:
     if not file_list:
         return {}
-
     try:
         subprocess.check_output(["exiftool", "-ver"], stderr=subprocess.DEVNULL)
     except Exception:
@@ -158,49 +143,32 @@ def exiftool_dates(file_list: list[str]) -> Dict[str, datetime]:
             args.append(f"-{tag}")
         args += ["-@", tmp.name]
 
-        proc = subprocess.run(
-            args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-
+        proc = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if proc.returncode != 0:
             print("[WARN] ExifTool retornou erro para alguns arquivos. Usando fallback onde necessário.")
 
         if not proc.stdout.strip():
             return {}
 
-        try:
-            data = json.loads(proc.stdout)
-        except Exception:
-            print("[WARN] Falha ao interpretar saída do ExifTool. Usando mtime.")
-            return {}
-
+        data = json.loads(proc.stdout)
         result: Dict[str, datetime] = {}
         for item in data:
             src = os.path.abspath(item.get("SourceFile", ""))
-            dt: Optional[datetime] = None
             for tag in DATE_TAGS_PREFERRED:
                 if tag in item:
                     dt = parse_exif_dt(item[tag])
-                    if dt:
+                    if dt and MIN_VALID_YEAR <= dt.year <= MAX_VALID_YEAR:
+                        result[src] = dt
                         break
-            if dt:
-                # saneamento mínimo também (evita datas absurdas)
-                if MIN_VALID_YEAR <= dt.year <= MAX_VALID_YEAR:
-                    result[src] = dt
         return result
-
     finally:
         try:
             os.unlink(tmp.name)
         except Exception:
             pass
 
-
 # ============================================================
-# INVENTÁRIO (HASH ONLY)
+# INVENTÁRIO
 # ============================================================
 
 def ensure_inventory(inv: Path) -> None:
@@ -208,10 +176,8 @@ def ensure_inventory(inv: Path) -> None:
     if not inv.exists():
         inv.write_text("", encoding="utf-8")
 
-
 def load_inventory(inv: Path) -> Set[str]:
     return {l.strip() for l in inv.read_text(encoding="utf-8").splitlines() if l.strip()}
-
 
 def rewrite_inventory(inv: Path, keys: Set[str]) -> None:
     tmp = inv.with_suffix(".tmp")
@@ -219,7 +185,6 @@ def rewrite_inventory(inv: Path, keys: Set[str]) -> None:
         for k in sorted(keys):
             f.write(k + "\n")
     tmp.replace(inv)
-
 
 # ============================================================
 # CÓPIA SEGURA
@@ -234,11 +199,25 @@ def unique_target(dest: Path, name: str) -> Path:
         i += 1
     return p
 
-
 def safe_copy(src: str, dst: Path) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
 
+# ============================================================
+# NOVA ROTINA – CÓPIA DUPLA PARA ARQUIVOS NOVOS
+# ============================================================
+
+def copy_new_file_twice(
+    src: str,
+    primary_dir: Path,
+    extra_dir: Optional[Path],
+    name: str,
+) -> None:
+    primary_target = unique_target(primary_dir, name)
+    safe_copy(src, primary_target)
+    if extra_dir:
+        extra_target = unique_target(extra_dir, name)
+        safe_copy(src, extra_target)
 
 # ============================================================
 # MAIN
@@ -246,7 +225,7 @@ def safe_copy(src: str, dst: Path) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Organiza fotos e vídeos por data real com inventário por hash parcial (robusto)."
+        description="Organiza fotos e vídeos por data real com inventário por hash parcial."
     )
     ap.add_argument("source", type=Path)
     ap.add_argument("dest", type=Path)
@@ -254,43 +233,39 @@ def main() -> None:
                     default=Path("~/inventory_files.txt").expanduser())
     ap.add_argument("--dupe-action", choices=["skip", "to-duplicates"], default="skip")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument(
+        "--copy-new-to",
+        type=Path,
+        help="Diretório adicional para copiar apenas arquivos novos"
+    )
     args = ap.parse_args()
 
     source = args.source.resolve()
     dest = args.dest.resolve()
     inv_path = args.inventory_file.expanduser().resolve()
+    extra_new_dest = args.copy_new_to.expanduser().resolve() if args.copy_new_to else None
 
-    # -------- INVENTÁRIO STATUS --------
+    # garante criação do diretório base do extra
+    if extra_new_dest and not args.dry_run:
+        extra_new_dest.mkdir(parents=True, exist_ok=True)
+
     t0 = time.perf_counter()
     if inv_path.exists():
         print("[STATUS] Arquivo de inventário encontrado. Carregando inventário existente...")
         inventory = load_inventory(inv_path)
-        created = False
     else:
         print("[STATUS] Arquivo de inventário não encontrado. Criando novo inventário...")
         if not args.dry_run:
             ensure_inventory(inv_path)
         inventory = set()
-        created = True
 
-    elapsed = time.perf_counter() - t0
-    if created:
-        print(f"[STATUS] Inventário criado e carregado em {elapsed:.2f}s: {inv_path}")
-    else:
-        print(f"[STATUS] Inventário carregado em {elapsed:.2f}s: {inv_path}")
-
+    print(f"[STATUS] Inventário pronto em {time.perf_counter() - t0:.2f}s: {inv_path}")
     print("[STATUS] Iniciando processamento dos arquivos...")
 
-    # -------- ESTATÍSTICAS --------
-    total_encontrados = 0
-    novos_detectados = 0
-    duplicados_detectados = 0
-    copiados_destino = 0
-    copiados_duplicados = 0
-    ignorados = 0
-    erros = 0
-    mtime_invalidos = 0
-    sem_data_exif = 0
+    total_encontrados = novos_detectados = duplicados_detectados = 0
+    copiados_destino = copiados_duplicados = ignorados = erros = 0
+    copiados_novos_extra = 0
+    mtime_invalidos = sem_data_exif = 0
 
     scanned = list(fast_walk_entries(str(source), DEFAULT_EXTS))
     exif_map = exiftool_dates([p for p, _, _ in scanned])
@@ -303,7 +278,6 @@ def main() -> None:
             dt = safe_datetime_from_timestamp(mtime)
             if dt is None:
                 mtime_invalidos += 1
-                # fallback final: usa uma data "neutra" para não quebrar ordenação
                 dt = datetime(1970, 1, 1)
         key = fast_partial_hash(abs_path)
         items.append((dt, abs_path, name, key))
@@ -311,50 +285,54 @@ def main() -> None:
     items.sort(key=lambda x: x[0])
 
     total = len(items)
-    processed = 0
     last_percent = -1
 
-    for dt, abs_path, name, key in items:
-        processed += 1
-        total_encontrados += 1
-
-        percent = (processed * 100) // total if total else 100
+    for idx, (dt, abs_path, name, key) in enumerate(items, 1):
+        percent = (idx * 100) // total if total else 100
         if percent != last_percent:
-            print(f"[PROGRESS] {percent}% ({processed}/{total})")
+            print(f"[PROGRESS] {percent}% ({idx}/{total})")
             last_percent = percent
 
         try:
+            total_encontrados += 1
             if key in inventory:
                 duplicados_detectados += 1
                 if args.dupe_action == "skip":
                     ignorados += 1
                     continue
                 target_dir = dest / "_duplicates" / f"{dt.year:04d}" / f"{dt.month:02d}"
+                if not args.dry_run:
+                    target = unique_target(target_dir, name)
+                    safe_copy(abs_path, target)
                 copiados_duplicados += 1
             else:
                 novos_detectados += 1
                 target_dir = dest / f"{dt.year:04d}" / f"{dt.month:02d}"
+                extra_dir = (
+                    extra_new_dest / f"{dt.year:04d}" / f"{dt.month:02d}"
+                    if extra_new_dest else None
+                )
+                if not args.dry_run:
+                    copy_new_file_twice(abs_path, target_dir, extra_dir, name)
+                    inventory.add(key)
+                    if extra_dir:
+                        copiados_novos_extra += 1
                 copiados_destino += 1
-
-            if not args.dry_run:
-                target = unique_target(target_dir, name)
-                safe_copy(abs_path, target)
-                inventory.add(key)
-
-        except Exception:
+        except Exception as e:
             erros += 1
-            continue
+            print(f"[ERROR] Falha ao processar {abs_path}: {e}")
 
     if not args.dry_run:
         rewrite_inventory(inv_path, inventory)
 
-    # -------- RESUMO --------
     print("\n========== RESUMO DA EXECUÇÃO ==========")
     print(f"Arquivos encontrados:            {total_encontrados}")
     print(f"Arquivos novos:                  {novos_detectados}")
     print(f"Duplicados detectados:           {duplicados_detectados}")
     print(f"Copiados para destino:           {copiados_destino}")
     print(f"Copiados para _duplicates:       {copiados_duplicados}")
+    if extra_new_dest:
+        print(f"Copiados para novos_arquivos:    {copiados_novos_extra}")
     print(f"Ignorados:                      {ignorados}")
     print(f"Erros:                          {erros}")
     print(f"Sem data EXIF/QuickTime:         {sem_data_exif}")
@@ -362,9 +340,7 @@ def main() -> None:
     if args.dry_run:
         print("Modo DRY-RUN: nenhuma cópia realizada")
     print("=======================================\n")
-
     print("[DONE] Execução finalizada com sucesso.")
-
 
 if __name__ == "__main__":
     main()
